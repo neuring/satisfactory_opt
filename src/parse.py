@@ -1,13 +1,17 @@
 from enum import Enum, auto
-from typing import List, Optional, Tuple, cast
+from typing import List, Optional, Tuple, cast, NamedTuple
 from dataclasses import dataclass
 import re
+from error import Error
+from source import Span
 
+@dataclass
 class Expr:
+    span: Span
 
     def pretty_print(self):
         match self:
-            case Term(lhs, op, rhs):
+            case Term(lhs=lhs, op=op, rhs=rhs):
                 if isinstance(lhs, Term) and lhs.op.binding_power() < op.binding_power():
                     lhs_str = f"({lhs.pretty_print()})"
                 elif lhs is None:
@@ -31,9 +35,9 @@ class Expr:
                         op = "/"
 
                 return f"{lhs_str} {op} {rhs_str}"
-            case Constant(c):
+            case Constant(constant=c):
                 return str(c)
-            case Variable(v):
+            case Variable(name=v):
                 return v
 
 @dataclass
@@ -58,21 +62,22 @@ class Term(Expr):
 @dataclass
 class Constant(Expr):
     constant: float
+    span: Span
 
 @dataclass
 class Variable(Expr):
     name: str
+    span: Span
 
-@dataclass
-class Recipe:
+class Recipe(NamedTuple):
     inputs: Expr
     outputs: Expr
+    span: Span
 
     def pretty_print(self) -> str:
         return f"{self.inputs.pretty_print()} -> {self.outputs.pretty_print()}"
 
-@dataclass
-class Constraint:
+class Constraint(NamedTuple):
     class Type(Enum):
         EQUALITY=auto()
         LESS_EQ=auto()
@@ -81,6 +86,7 @@ class Constraint:
     lhs: Expr
     ty: "Constraint.Type"
     rhs: Expr
+    span: Span
 
     def pretty_print(self) -> str:
         match self.ty:
@@ -93,26 +99,20 @@ class Constraint:
 
         return f"{self.lhs.pretty_print()} {op} {self.rhs.pretty_print()}"
 
-@dataclass
-class Goal:
+class Goal(NamedTuple):
     class Type(Enum):
-        MAX=auto()
-        MIN=auto()
+        MAX="max"
+        MIN="min"
 
     term: Expr
     ty: "Goal.Type"
+    span: Span
 
     def pretty_print(self) -> str:
-        match self.ty:
-            case Goal.Type.MIN:
-                op = "min"
-            case Goal.Type.MAX:
-                op = "max"
-
-        return f"{op} {self.term.pretty_print()}"
+        return f"{self.ty} {self.term.pretty_print()}"
 
 @dataclass
-class Result:
+class Rules:
     recipes: List[Recipe]
     constraints: List[Constraint]
     goal: Goal
@@ -124,24 +124,6 @@ class Result:
 
         return "\n\n".join([r, c, g])
 
-
-@dataclass
-class Span:
-    start: int
-    end: int
-
-    @staticmethod
-    def start_len(start: int, len: int) -> "Span":
-        return Span(start=start, end=start+len)
-
-    @staticmethod
-    def empty() -> "Span":
-        return Span(start=0, end=0)
-
-    @property
-    def len(self) -> int:
-        assert(self.end >= self.start)
-        return self.end - self.start
 
 # GRAMMAR:
 class Token:
@@ -215,25 +197,48 @@ class Token:
         return f"<Token {self.ty}{data}>"
 
 @dataclass
-class InvalidToken(Exception):
+class InvalidToken(Error):
     position: int
 
+    @property
+    def span(self) -> List[Span]:
+        return [Span.start_len(self.position, 1)]
+
 @dataclass
-class DuplicateGoal(Exception):
+class DuplicateGoal(Error):
     first_goal: Goal 
     second_goal: Goal
 
-@dataclass
-class MissingGoal(Exception):
-    pass
+    @property
+    def span(self) -> List[Span]:
+        return [self.first_goal.span, self.second_goal]
+
+    def create_message(self) -> str:
+        return "Multiple goals in ruleset"
 
 @dataclass
-class UnexpectedToken(Exception):
+class MissingGoal(Error):
+    pass
+
+    @property
+    def span(self) -> List[Span]:
+        return None
+
+    def create_message(self) -> str:
+        return "No goal in ruleset"
+
+@dataclass
+class UnexpectedToken(Error):
     token: Token
     context: str  # The thing we were parsing at the moment
 
+    @property
+    def span(self) -> List[Span]:
+        return [self.token.span]
 
-ParseException = InvalidToken | DuplicateGoal | MissingGoal | UnexpectedToken
+    def create_message(self) -> str:
+        return f"Unexpected token in {self.context} ({self.token.as_str()})"
+
 
 _NUMBER_PATTERN = re.compile(r"^\d+(\.\d*)?")
 _STRING_PATTERN = re.compile(r"^(([A-z][A-z ]*[A-z])|[A-z])")
@@ -338,6 +343,7 @@ class Parser:
     OPERATOR_TOKENS = [Token.Type.PLUS, Token.Type.MINUS, Token.Type.SLASH, Token.Type.STAR]
 
     def parse_goal(self) -> Goal:
+        ty_span = self.current_token.span
         match self.current_token.ty:
             case Token.Type.MAX:
                 ty = Goal.Type.MAX
@@ -348,25 +354,29 @@ class Parser:
         self.next_token()
 
         expr = self.parse_expr()
-        return Goal(expr, ty)
+        return Goal(expr, ty, ty_span.merge(expr.span))
 
     def parse_atom(self) -> Expr:
 
         negate = self.current_token.ty == Token.Type.MINUS
 
         if negate:
+            negate_span = self.current_token.span
             self.next_token()
 
         match self.current_token.ty:
             case Token.Type.NUMBER:
-                result = Constant(float(cast(str, self.current_token.data)))
+                result = Constant(constant=float(cast(str, self.current_token.data)), span=self.current_token.span)
                 self.next_token()
             case Token.Type.STRING:
-                result = Variable(cast(str, self.current_token.data))
+                result = Variable(name=cast(str, self.current_token.data), span=self.current_token.span)
                 self.next_token()
             case Token.Type.LPAREN:
+                span_start = self.current_token.span
                 self.next_token()
                 result = self.parse_expr()
+                span_end = self.current_token.span
+                result.span = span_start.merge(span_end)
                 if (unexpected_token := self.current_token).ty != Token.Type.RPAREN:
                     raise UnexpectedToken(unexpected_token, "Expression in parentheses")
                 self.next_token()
@@ -374,7 +384,7 @@ class Parser:
                 raise UnexpectedToken(self.current_token, "Atom")
 
         if negate:
-            result = Term(None, Term.Op.SUB, result)
+            result = Term(lhs=None, op=Term.Op.SUB, rhs=result, span=negate_span.merge(result.span))
 
         return result
 
@@ -400,7 +410,7 @@ class Parser:
 
             rhs = self.parse_expr(r_bp)
 
-            lhs = Term(lhs, self.token_op_to_term_op(op.ty, implicit_multiplication), rhs)
+            lhs = Term(lhs=lhs, op=self.token_op_to_term_op(op.ty, implicit_multiplication), rhs=rhs, span=lhs.span.merge(rhs.span))
 
         return lhs
 
@@ -427,7 +437,7 @@ class Parser:
             case _:
                 assert False, f"token {token} is not an operator"
 
-    def parse(self) -> Result:
+    def parse(self) -> Rules:
         constraints = []
         recipes = []
         goal = None
@@ -446,7 +456,7 @@ class Parser:
                     # Parsing Recipe
                     self.next_token()
                     rhs = self.parse_expr()
-                    recipes.append(Recipe(lhs, rhs))
+                    recipes.append(Recipe(lhs, rhs, lhs.span.merge(rhs.span)))
                 elif self.current_token.ty in Parser.CONSTRAINT_OP_TOKENS:
                     # Parsing Constraint
                     match self.current_token.ty:
@@ -460,7 +470,7 @@ class Parser:
                             assert False, "Unreacheable"
                     self.next_token()
                     rhs = self.parse_expr()
-                    constraints.append(Constraint(lhs, ty, rhs))
+                    constraints.append(Constraint(lhs, ty, rhs, lhs.span.merge(rhs.span)))
                 else:
                     raise UnexpectedToken(self.current_token, "recipe or constraint")
             elif self.current_token.ty == Token.Type.NEWLINE:
@@ -472,7 +482,7 @@ class Parser:
         if goal is None:
             raise MissingGoal()
 
-        return Result(recipes, constraints, goal)
+        return Rules(recipes, constraints, goal)
         
 if __name__ == '__main__':
     import sys
