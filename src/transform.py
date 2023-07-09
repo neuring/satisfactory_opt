@@ -4,7 +4,7 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, auto
 from collections import defaultdict
-from typing import DefaultDict, Optional, Union, List, NamedTuple
+from typing import DefaultDict, Optional, Union, List, NamedTuple, Dict, Any
 from error import Error
 from parse import Expr as ASTExpr, Constant as ASTConstant, Term as ASTTerm, Variable as ASTVariable, Rules as ASTRules, Goal as ASTGoal, Recipe as ASTRecipe, Constraint as ASTConstraint
 from report import report_error
@@ -14,7 +14,8 @@ from source import Span
 class LinearExpression:
     # Maps variables to their coefficent.
     # The key `None` stores the constant part of the expression
-    variable_coefficients: DefaultDict[Optional[str], float]
+
+    variable_coefficients: DefaultDict[Optional[Any], float]
 
     def add(self, other) -> "LinearExpression":
         result = defaultdict(float)
@@ -49,12 +50,15 @@ class LinearExpression:
 
     @property
     def constant_part(self) -> float:
-        return self.variable_coefficients[None]
+        return self.variable_coefficients[None] if None in self.variable_coefficients else 0.0
     
     def __str__(self) -> str:
         #terms = sorted(self.variable_coefficients.items(), key=lambda x: x[0])
         terms = self.variable_coefficients.items()
         return " + ".join([f"{val} {var if var is not None else ''}" for var, val in terms])
+    
+    def variables(self) -> List[str]:
+        return [var for var in self.variable_coefficients.keys() if var is not None]
 
 @dataclass
 class NonLinearExpressionException(Error):
@@ -208,7 +212,7 @@ def normalize_rules(rules: ASTRules) -> NormalizedRules:
         normalized_recipes.append(Recipe(linear_inputs, linear_outputs))
 
     try:
-        normalized_goal = Goal(rules.goal.ty.value, linearize(rules.goal.term))
+        normalized_goal = Goal(rules.goal.ty, linearize(rules.goal.term))
     except NonLinearExpressionException:
         raise NonLinearExpressionException(rules.goal)
 
@@ -239,6 +243,124 @@ def normalize_rules(rules: ASTRules) -> NormalizedRules:
     return NormalizedRules(normalized_recipes, normalized_constraints, normalized_goal)
 
 
+def _count_uses(recipes: List[Recipe]) -> Dict[str, int]:
+    result = defaultdict(int)
+
+    for recipe in recipes:
+        for var in recipe.inputs.variables():
+            result[var] += 1
+    
+    return result
+
+
+def _count_constructions(recipes: List[Recipe]) -> Dict[str, int]:
+    result = defaultdict(int)
+
+    for recipe in recipes:
+        for var in recipe.outputs.variables():
+            result[var] += 1
+    
+    return result
+
+_SUBSCRIPT_TRANSLATION = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+class IndexedVar(NamedTuple):
+    class Direction(Enum):
+        IN=auto()
+        OUT=auto()
+        POOL=auto()
+
+    name: str
+    dir: "IndexedVar.Direction"
+    # Index is always zero if dir is POOL
+    index: int
+
+    def __eq__(self, other) -> bool:
+        return self.name == other.name and self.dir == other.dir and self.index == other.index
+    
+    def __hash__(self):
+        return hash((self.name, self.dir, self.index))
+    
+    def __str__(self):
+        match self.dir:
+            case IndexedVar.Direction.POOL:
+                d = "ᴾᴼᴼᴸ"
+            case IndexedVar.Direction.IN:
+                d = "ᴵᴺ"
+            case IndexedVar.Direction.OUT:
+                d = "ᴼᵁᵀ"
+        return f"{self.name}{d}{str(self.index).translate(_SUBSCRIPT_TRANSLATION)}"
+
+def _index_expr(
+    expr: LinearExpression, 
+    dir: IndexedVar.Direction, 
+    appearances: Dict[str, int], 
+    next_index: Dict[str, int]
+) -> LinearExpression:
+
+    result = {}
+    for var, val in expr.variable_coefficients.items():
+
+        if var is None:
+            result[None] = val
+        
+        match dir:
+            case IndexedVar.Direction.POOL:
+                result[IndexedVar(var, IndexedVar.Direction.POOL, 0)] = val
+            case IndexedVar.Direction.IN | IndexedVar.Direction.OUT:
+                if appearances[var] > 1:
+                    idx = next_index[var]
+                    next_index[var] += 1
+                    result[IndexedVar(var, dir, idx)] = val
+                else:
+                    result[IndexedVar(var, IndexedVar.Direction.POOL, 0)] = val
+    return LinearExpression(result)
+
+class IndexResult(NamedTuple):
+    uses: Dict[str, int]
+    constructions: Dict[str, int]
+    rules: NormalizedRules
+
+def index_rules(rules: NormalizedRules) -> IndexResult:
+    """
+    In order to formulate recipes as a set of linear equations, variables that appear in multiple recipes
+    need to be distinct.
+    Then we can constrain the system so that all the sum of all out variables is equal to the sum of all input variables.
+    This forces the the system to balance input and output.
+
+    We therefore introduce three types of variables:
+    - INPUT: Variable that appear in input of recipes (also called uses)
+    - OUTPUT: Variable that appear in output of recipes (also called constructions)
+    - POOL: This variable is equivalent to the sum of INPUT variables (likewise equivalent to the sum of OUTPUT variables).
+            POOL Variables are used in constraints or the goal
+    
+    When a material is only used (created) in one recipe. We use the corresponding POOL variable instead to avoid unecessary variable bloat.
+    """
+
+    uses = _count_uses(rules.recipes)
+    constructions = _count_constructions(rules.recipes)
+
+    next_index_use = defaultdict(int)
+    next_index_construct = defaultdict(int)
+
+    indexed_recipes = []
+    for recipe in rules.recipes:
+        indexed_input = _index_expr(recipe.inputs, IndexedVar.Direction.IN, uses, next_index_use)
+        indexed_output = _index_expr(recipe.outputs, IndexedVar.Direction.OUT, constructions, next_index_construct)
+        indexed_recipes.append(Recipe(indexed_input, indexed_output))
+
+    indexed_constraints = []
+    for constraint in rules.constraints:
+        indexed_expr = _index_expr(constraint.term, IndexedVar.Direction.POOL, None, None)
+        indexed_constraints.append(Constraint(indexed_expr, constraint.ty, constraint.bound))
+
+    indexed_goal_expr = _index_expr(rules.goal.term, IndexedVar.Direction.POOL, None, None)
+    indexed_goal = Goal(rules.goal.ty, indexed_goal_expr)
+
+    normalized_rules = NormalizedRules(indexed_recipes, indexed_constraints, indexed_goal)
+
+    return IndexResult(uses, constructions, normalized_rules)
+
+
 if __name__ == '__main__':
     import sys
     from parse import Parser
@@ -249,7 +371,7 @@ if __name__ == '__main__':
         linear_expr = linearize(expr)
         print(linear_expr)
 
-    if sys.argv[1] == "normalize":
+    if sys.argv[1] in ["normalize", "index"]:
         with open(sys.argv[2]) as f:
             text = "\n".join(f.readlines())
 
@@ -261,4 +383,9 @@ if __name__ == '__main__':
             except Error as error:
                 report_error(error, text)
             else:
-                print(normalized_rules)
+                if sys.argv[1] == "normalize":
+                    print(normalized_rules)
+                elif sys.argv[1] == "index":
+                    indexed_rules = index_rules(normalized_rules)
+                    print(indexed_rules.rules)
+
