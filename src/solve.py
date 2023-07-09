@@ -1,9 +1,56 @@
-from scipy.optimize import linprog
+from typing import NamedTuple
+from enum import Enum, auto
+from scipy.optimize import linprog, OptimizeResult
 import numpy as np
 
-from lower import LoweringResult, LinProgBound, LinProgConstraint
+from lower import LoweringResult, LinProgBound, LinProgConstraint, IndexMap
+from transform import IndexedVar, Recipe
 
-def solve(lower: LoweringResult):
+class ExitStatus(Enum):
+    SUCCESS=auto()
+    ITERATION_LIMIT=auto()
+    PROBLEM_INFEASIBLE=auto()
+    PROBLEM_UNBOUNDED=auto()
+    NUMERICAL_ERROR=auto()
+
+class SolveResult(NamedTuple):
+    inner: OptimizeResult
+    imap: IndexMap
+
+    @property
+    def status(self) -> ExitStatus:
+        match self.inner.status:
+            case 0:
+                return ExitStatus.SUCCESS
+            case 1:
+                return ExitStatus.ITERATION_LIMIT
+            case 2:
+                return ExitStatus.PROBLEM_INFEASIBLE
+            case 3:
+                return ExitStatus.PROBLEM_UNBOUNDED
+            case 4:
+                return ExitStatus.NUMERICAL_ERROR
+    
+    def __getitem__(self, index) -> float:
+        match index:
+            case str():
+                return self.inner.x[self.imap[IndexedVar(index, IndexedVar.Direction.POOL, 0)]]
+            case IndexedVar():
+                return self.inner.x[self.imap[index]]
+
+    def index(self, index) -> float:
+        match index:
+            case str():
+                return self.imap[IndexedVar(index, IndexedVar.Direction.POOL, 0)]
+            case IndexedVar():
+                return self.imap[index]
+    
+    def recipe_used(self, recipe: Recipe) -> bool:
+        var = list(recipe.outputs.variables())[0]
+        return self[var] > 0
+            
+
+def solve(lower: LoweringResult) -> SolveResult:
 
     total_vars = len(lower.imap)
 
@@ -36,7 +83,7 @@ def solve(lower: LoweringResult):
         goal[var_idx] = factor
     
     result = linprog(goal, ineq_matrix, ineq_vector, eq_matrix, eq_vector, bounds)
-    print(result)
+    return SolveResult(result, lower.imap)
 
 if __name__ == '__main__':
     import sys

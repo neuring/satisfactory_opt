@@ -289,6 +289,9 @@ class IndexedVar(NamedTuple):
             case IndexedVar.Direction.OUT:
                 d = "ᴼᵁᵀ"
         return f"{self.name}{d}{str(self.index).translate(_SUBSCRIPT_TRANSLATION)}"
+    
+    def pool(self) -> "IndexedVar":
+        return IndexedVar(self.name, IndexedVar.Direction.POOL, 0)
 
 def _index_expr(
     expr: LinearExpression, 
