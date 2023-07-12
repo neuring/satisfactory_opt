@@ -67,17 +67,17 @@ max Iron Rod + Iron Plate
 ```
 
 $$
-30 * IO^{in}_0 = 30 * II^{out}_{0} \\
-15 * II^{in}_0 = 30 * IR^{out}_{0} \\
-20 * II^{in}_1 = 30 * IP^{out}_{0} \\
-\\
-IO^{in} = IO^{pool} \\
-II^{in}_0 + II^{in}_1 = II^{pool} \\
-II^{out}_0 = II^{pool} \\
-IR^{out}_0 = IR^{pool} \\
-IP^{out}_0 = IP^{pool} \\
-
-max\quad I^{pool} \\
+\begin{align}
+30\*IO^{in}\_0 &= 30 \* II^{out}\_{0} \\
+15\*II^{in}\_0 &= 30 \* IR^{out}\_{0} \\
+20\*II^{in}\_1 &= 30 \* IP^{out}\_{0}\\
+IO^{in} &= IO^{pool} \\
+II^{in}\_0 + II^{in}\_1 &= II^{pool} \\
+II^{out}\_0 &= II^{pool} \\
+IR^{out}\_0 &= IR^{pool} \\
+IP^{out}\_0 &= IP^{pool} \\
+max\quad I^{pool}
+\end{align}
 $$
 
 Additionally, all variables are forced to be positive.
@@ -100,9 +100,8 @@ These limitations are specified by simple inequalities.
 Almost all machines can be overclocked in Satisfactory.
 
 For machines that consume power, their power consumption given a certain overclocking factor is determined by this [formula](https://satisfactory.wiki.gg/wiki/Clock_speed)
-$$
-power usage = initial power usage * clock speed^{log_2(2.5)}
-$$
+
+$$power usage = initial power usage \* clock speed^{log_2(2.5)}$$
 
 This is especially relevant for resource extractors like miners.
 By overclocking them we get more resources to but need to pay exponentially more power.
